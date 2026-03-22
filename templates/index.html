@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>In-Scene Advertisement Integration</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1>Ad Placement AI System</h1>
+            <p>Seamlessly integrate your brand logo into video surfaces</p>
+        </header>
+
+        <main>
+            <section class="upload-section glass-panel">
+                <h2>1. Upload Assets</h2>
+                <form id="upload-form">
+                    <div class="file-inputs">
+                        <div class="file-drop-area">
+                            <label for="video-upload" class="file-label">
+                                <span class="file-msg" id="video-msg">Select a Video File</span>
+                                <input type="file" id="video-upload" name="video" accept="video/*" required>
+                            </label>
+                            <!-- Preview element injected here -->
+                            <video id="video-preview" class="hidden" controls style="max-height: 200px; width: 100%; object-fit: contain; margin-top: 10px;"></video>
+                        </div>
+                        
+                        <div class="file-drop-area">
+                            <label for="logo-upload" class="file-label">
+                                <span class="file-msg" id="logo-msg">Select Brand Logo</span>
+                                <input type="file" id="logo-upload" name="logo" accept="image/*" required>
+                            </label>
+                            <!-- Preview element injected here -->
+                            <img id="logo-preview" class="hidden" src="" alt="Logo Preview" style="max-height: 200px; width: 100%; object-fit: contain; margin-top: 10px;">
+                        </div>
+                    </div>
+                    
+                    <button type="submit" id="process-btn" class="primary-btn">
+                        <span class="btn-text">Process Video</span>
+                        <div class="loader hidden"></div>
+                    </button>
+                </form>
+            </section>
+
+            <section id="results-section" class="results-section hidden">
+                <h2>2. Processing Results</h2>
+                
+                <div class="results-grid">
+                    <div class="result-card">
+                        <h3>Extracted Initial Frames</h3>
+                        <p class="desc">All frames extracted from the video for analysis.</p>
+                        <div id="res-extracted-container" style="display: flex; flex-wrap: wrap; gap: 5px; max-height: 400px; overflow-y: auto; overflow-x: hidden; border: 1px solid #ccc; padding: 5px; background: #000;">
+                            <!-- Frame thumbnails will be injected directly here sequentially -->
+                        </div>
+                    </div>
+
+                    <div class="result-card glass-panel fade-in" style="animation-delay: 0.1s">
+                        <h3>Detected Surface <span class="badge">Green Highlight</span></h3>
+                        <p class="desc">The AI segmented object/surface selected for ad placement.</p>
+                        <div class="img-container">
+                            <img id="res-surface" src="" alt="Detected Surface">
+                        </div>
+                    </div>
+
+                    <div class="result-card glass-panel fade-in" style="animation-delay: 0.2s">
+                        <h3>Warped Brand Logo</h3>
+                        <p class="desc">The brand logo warped via homography to match the surface perspective.</p>
+                        <div class="img-container">
+                            <img id="res-warped" src="" alt="Warped Logo" style="object-fit: contain;">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="final-result-card glass-panel fade-in" style="animation-delay: 0.3s">
+                    <h3>Final Output Video</h3>
+                    <p class="desc">The brand logo continuously tracked and occluded correctly throughout the video.</p>
+                    <div class="video-container">
+                        <video id="res-video" controls>
+                            <source src="" type="video/mp4">
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# Ignore videos
+*.mp4
+
+# Ignore output folders
+static/outputs/*
+static/uploads/*
+assets/*
+
+# Ignore virtual environment
+.venv/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
