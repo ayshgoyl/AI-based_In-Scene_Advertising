@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,6 +8,7 @@
     <link rel="stylesheet" href="/static/style.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
+
 <body>
     <div class="app-container">
         <header>
@@ -21,38 +23,70 @@
                     <div class="file-inputs">
                         <div class="file-drop-area">
                             <label for="video-upload" class="file-label">
+                                <span class="file-icon">📹</span>
                                 <span class="file-msg" id="video-msg">Select a Video File</span>
                                 <input type="file" id="video-upload" name="video" accept="video/*" required>
                             </label>
-                            <!-- Preview element injected here -->
-                            <video id="video-preview" class="hidden" controls style="max-height: 200px; width: 100%; object-fit: contain; margin-top: 10px;"></video>
                         </div>
-                        
+
                         <div class="file-drop-area">
                             <label for="logo-upload" class="file-label">
+                                <span class="file-icon">🖼️</span>
                                 <span class="file-msg" id="logo-msg">Select Brand Logo</span>
                                 <input type="file" id="logo-upload" name="logo" accept="image/*" required>
                             </label>
-                            <!-- Preview element injected here -->
-                            <img id="logo-preview" class="hidden" src="" alt="Logo Preview" style="max-height: 200px; width: 100%; object-fit: contain; margin-top: 10px;">
                         </div>
                     </div>
                     
-                    <button type="submit" id="process-btn" class="primary-btn">
-                        <span class="btn-text">Process Video</span>
-                        <div class="loader hidden"></div>
+                    <button type="button" id="prepare-btn" style="width: 100%; margin-top: 10px; font-weight: bold;">
+                        1. Upload & Prepare Assets (Convert to 24fps H.264)
                     </button>
+                    <div class="loader hidden" id="prepare-loader" style="margin-top: 10px;">Converting with FFmpeg...</div>
+
+                    <div id="metadata-section" class="hidden" style="margin-top: 20px;">
+                        
+                        <!-- Post-Upload Server Previews -->
+                        <div style="display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 25px;">
+                            <div style="flex: 1; min-width: 280px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa;">
+                                <h3 style="margin-bottom: 10px;">Uploaded Input Video</h3>
+                                <video id="uploaded-video-preview" controls style="width: 100%; max-height: 250px; background: #000; display: block;"></video>
+                            </div>
+                            <div style="flex: 1; min-width: 280px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; background: #fafafa;">
+                                <h3 style="margin-bottom: 10px;">Uploaded Brand Logo</h3>
+                                <img id="uploaded-logo-preview" style="width: 100%; max-height: 250px; background: #000; object-fit: contain; display: block;">
+                            </div>
+                        </div>
+
+                        <h3>Asset Preparation Details</h3>
+                        <table style="width: 100%; border-collapse: collapse; margin-bottom: 15px;" border="1" cellpadding="8">
+                            <thead>
+                                <tr style="background-color: #f0f0f0;">
+                                    <th>Metric</th>
+                                    <th>Value</th>
+                                </tr>
+                            </thead>
+                            <tbody id="metadata-tbody">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+
+                        <button type="submit" id="process-btn" style="width: 100%; font-weight: bold; background-color: #28a745;">
+                            2. Run AI Ad Placement
+                        </button>
+                        <div class="loader hidden" id="process-loader" style="margin-top: 10px;">Running OpenCV Pipeline...</div>
+                    </div>
                 </form>
             </section>
 
             <section id="results-section" class="results-section hidden">
                 <h2>2. Processing Results</h2>
-                
+
                 <div class="results-grid">
                     <div class="result-card">
                         <h3>Extracted Initial Frames</h3>
                         <p class="desc">All frames extracted from the video for analysis.</p>
-                        <div id="res-extracted-container" style="display: flex; flex-wrap: wrap; gap: 5px; max-height: 400px; overflow-y: auto; overflow-x: hidden; border: 1px solid #ccc; padding: 5px; background: #000;">
+                        <div id="res-extracted-container"
+                            style="display: flex; flex-wrap: wrap; gap: 5px; max-height: 400px; overflow-y: auto; overflow-x: hidden; border: 1px solid #ccc; padding: 5px; background: #000;">
                             <!-- Frame thumbnails will be injected directly here sequentially -->
                         </div>
                     </div>
@@ -90,4 +124,5 @@
 
     <script src="/static/script.js"></script>
 </body>
+
 </html>
