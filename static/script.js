@@ -54,9 +54,9 @@ document.addEventListener('DOMContentLoaded', () => {
             
             currentJobId = data.job_id;
             
-            // Bind server-side uploaded assets
-            document.getElementById('uploaded-video-preview').src = `/static/uploads/${currentJobId}/input_video.mp4`;
-            document.getElementById('uploaded-logo-preview').src = `/static/uploads/${currentJobId}/input_logo.png`;
+            // Bind frontend uploaded assets directly via Object URLs
+            document.getElementById('uploaded-video-preview').src = URL.createObjectURL(videoInput.files[0]);
+            document.getElementById('uploaded-logo-preview').src = URL.createObjectURL(logoInput.files[0]);
             
             // Build table dynamically
             metadataTbody.innerHTML = `
