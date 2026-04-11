@@ -3,6 +3,7 @@ import uuid
 import subprocess
 import cv2
 import imageio_ffmpeg
+import tempfile
 from flask import Flask, request, jsonify, render_template
 
 from ad_inserter import AdPlacementSystem
@@ -10,13 +11,12 @@ from ad_inserter import AdPlacementSystem
 app = Flask(__name__)
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'uploads')
 OUTPUT_FOLDER = os.path.join(BASE_DIR, 'static', 'outputs')
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['UPLOAD_FOLDER'] = os.path.join(tempfile.gettempdir(), "anti1_uploads")
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 app.config['OUTPUT_FOLDER'] = OUTPUT_FOLDER
 
 def get_video_metadata(filepath):
