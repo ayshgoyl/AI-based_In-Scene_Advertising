@@ -12,3 +12,5 @@ assets/*
 # Ignore Python cache
 __pycache__/
 *.pyc
+
+.env

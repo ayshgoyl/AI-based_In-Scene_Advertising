@@ -4,9 +4,21 @@ import subprocess
 import cv2
 import imageio_ffmpeg
 import tempfile
+import mimetypes
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify, render_template
 
 from ad_inserter import AdPlacementSystem
+
+load_dotenv()
+try:
+    from supabase import create_client, Client
+    url = os.environ.get("SUPABASE_URL", "")
+    key = os.environ.get("SUPABASE_KEY", "")
+    supabase_bucket = os.environ.get("SUPABASE_BUCKET", "outputs")
+    supabase = create_client(url, key) if url and key else None
+except Exception:
+    supabase = None
 
 app = Flask(__name__)
 
@@ -38,6 +50,27 @@ def get_video_metadata(filepath):
         return size, codec, round(fps, 2)
     except Exception:
         return os.path.getsize(filepath) if os.path.exists(filepath) else 0, "unknown", 0
+
+def get_or_upload_file(local_path, remote_path):
+    if not os.path.exists(local_path):
+        return ""
+    if not supabase:
+        return f"/static/outputs/{remote_path}"
+    
+    mime_type, _ = mimetypes.guess_type(local_path)
+    if mime_type is None:
+        mime_type = "application/octet-stream"
+        
+    try:
+        supabase.storage.from_(supabase_bucket).upload(
+            path=remote_path,
+            file=local_path,
+            file_options={"content-type": mime_type, "upsert": "true"}
+        )
+        return supabase.storage.from_(supabase_bucket).get_public_url(remote_path)
+    except Exception as e:
+        print(f"Supabase upload failed for {local_path}: {e}")
+        return f"/static/outputs/{remote_path}"
 
 @app.route('/')
 def index():
@@ -116,18 +149,28 @@ def process():
         system = AdPlacementSystem()
         system.process_video(video_path, logo_path, output_video_path, debug_dir=job_output_dir)
         
-        extracted_frames = []
+        extracted_frames_urls = []
         if os.path.exists(job_output_dir):
             for file in sorted(os.listdir(job_output_dir)):
                 if file.startswith("extracted_frame_") and file.endswith(".jpg"):
-                    extracted_frames.append(f"/static/outputs/{job_id}/{file}")
+                    local_f = os.path.join(job_output_dir, file)
+                    remote_f = f"{job_id}/{file}"
+                    extracted_frames_urls.append(get_or_upload_file(local_f, remote_f))
         
+        det_surf_local = os.path.join(job_output_dir, "detected_surface.jpg")
+        det_surf_url = get_or_upload_file(det_surf_local, f"{job_id}/detected_surface.jpg")
+        
+        warped_ad_local = os.path.join(job_output_dir, "warped_ad.png")
+        warped_ad_url = get_or_upload_file(warped_ad_local, f"{job_id}/warped_ad.png")
+        
+        output_video_url = get_or_upload_file(output_video_path, f"{job_id}/output.mp4")
+
         return jsonify({
             "message": "Processing complete",
-            "extracted_frames": extracted_frames,
-            "detected_surface": f"/static/outputs/{job_id}/detected_surface.jpg",
-            "warped_ad": f"/static/outputs/{job_id}/warped_ad.png",
-            "output_video": f"/static/outputs/{job_id}/output.mp4"
+            "extracted_frames": extracted_frames_urls,
+            "detected_surface": det_surf_url,
+            "warped_ad": warped_ad_url,
+            "output_video": output_video_url
         })
     except Exception as e:
         import traceback
