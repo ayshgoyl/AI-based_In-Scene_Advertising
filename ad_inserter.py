@@ -1,118 +1,84 @@
 import cv2
 import numpy as np
 import os
+import torch
+import copy
+from ultralytics import YOLO, SAM, FastSAM
 
 class AdPlacementSystem:
     def __init__(self, target_fps=None):
         self.target_fps = target_fps
-        # Feature detector for tracking surfaces
-        self.feature_params = dict(maxCorners=300, qualityLevel=0.01, minDistance=10, blockSize=7)
-        self.lk_params = dict(winSize=(21, 21), maxLevel=2,
-                              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.03))
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}", flush=True)
 
-    def detect_surface(self, frame):
-        """
-        Detects a suitable surface (largest quadrilateral) for ad placement.
-        Returns the 4 corner points of the detected surface.
-        """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 50, 150)
+        # 1. Initialize YOLOv8 Segmentation model for Object Tracking & Human Occlusion
+        print("Loading YOLOv8-Seg...", flush=True)
+        try:
+            self.yolo_model = YOLO("yolov8n-seg.pt") 
+        except Exception as e:
+            print("YOLO init error:", e, flush=True)
 
-        # Find contours
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        # 2. Initialize SAM for exact Segmentation of the target surface
+        self.sam_model = None
+        print("Loading FastSAM (lighter, faster variant of SAM)...", flush=True)
+        try:
+            self.sam_model = FastSAM("FastSAM-s.pt")
+        except Exception as e:
+            print("SAM init error:", e, flush=True)
 
-        for contour in contours:
-            # Approximate the contour
-            peri = cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-
-            # If our approximated contour has four points, we can assume it's a suitable surface
-            if len(approx) == 4 and cv2.contourArea(approx) > 5000:
-                # Reshape to a list of points
-                pts = approx.reshape(4, 2).astype(np.float32)
-                return self._order_points(pts)
-
-        # Fallback: return a centered rectangle if no distinct quadrilateral is found
-        h, w = frame.shape[:2]
-        margin_x, margin_y = int(w * 0.2), int(h * 0.2)
-        pts = np.array([
-            [margin_x, margin_y],
-            [w - margin_x, margin_y],
-            [w - margin_x, h - margin_y],
-            [margin_x, h - margin_y]
-        ], dtype=np.float32)
-        return pts
-
-    def _order_points(self, pts):
-        """Order points: top-left, top-right, bottom-right, bottom-left"""
-        rect = np.zeros((4, 2), dtype=np.float32)
-        s = pts.sum(axis=1)
-        rect[0] = pts[np.argmin(s)]
-        rect[2] = pts[np.argmax(s)]
-
-        diff = np.diff(pts, axis=1)
-        rect[1] = pts[np.argmin(diff)]
-        rect[3] = pts[np.argmax(diff)]
-        return rect
-
-    def get_features_in_poly(self, frame_gray, poly_pts):
-        """Get trackable features strictly inside the detected polygon."""
-        mask = np.zeros_like(frame_gray)
-        cv2.fillConvexPoly(mask, poly_pts.astype(np.int32), 255)
-        # Find corners inside the mask
-        corners = cv2.goodFeaturesToTrack(frame_gray, mask=mask, **self.feature_params)
-        return corners
+        # 3. Initialize MiDaS for Depth Estimation
+        print("Loading MiDaS...", flush=True)
+        try:
+            self.midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small").to(self.device).eval()
+            midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+            self.midas_transform = midas_transforms.small_transform
+        except Exception as e:
+            print("MiDaS init error:", e, flush=True)
+            self.midas = None
 
     def process_video(self, video_path, logo_path, output_path, debug_dir=None):
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"Error opening video at {video_path}")
             return
-
-        # Read logo
+            
         logo = cv2.imread(logo_path, cv2.IMREAD_UNCHANGED)
         if logo is None:
             print(f"Error opening logo at {logo_path}")
             return
-            
-        # Ensure logo has an alpha channel for blending
         if logo.shape[2] == 3:
             logo = cv2.cvtColor(logo, cv2.COLOR_BGR2BGRA)
-
+            
         logo_h, logo_w = logo.shape[:2]
-        logo_pts = np.array([
-            [0, 0],
-            [logo_w - 1, 0],
-            [logo_w - 1, logo_h - 1],
-            [0, logo_h - 1]
-        ], dtype=np.float32)
+        logo_pts = np.array([[0, 0], [logo_w - 1, 0], [logo_w - 1, logo_h - 1], [0, logo_h - 1]], dtype=np.float32)
 
-        # Video properties
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         fps = self.target_fps if self.target_fps else original_fps
-        # Adjust frames if target_fps is set differently
         frame_read_interval = int(original_fps / fps) if fps and original_fps >= fps else 1
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # Use 'avc1' (H.264) so it's playable natively in browsers via the HTML5 <video> tag
+        # MASSIVE SPEED OPTIMIZATION: Process at 640p max width for CPU real-time speeds
+        max_w = 640
+        if original_width > max_w:
+            scale = max_w / float(original_width)
+            width = max_w
+            height = int(original_height * scale)
+        else:
+            width = original_width
+            height = original_height
+        
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
         fourcc = cv2.VideoWriter_fourcc(*'avc1')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-        print(f"Starting video processing: {width}x{height} @ {fps} FPS")
+        print(f"Starting video processing: {width}x{height} @ {fps} FPS (Total frames: {total_frames})", flush=True)
 
         first_frame = True
-        prev_gray = None
-        p0 = None
-        surface_pts = None
-
-        # To handle occlusion, we store the first frame's appearance inside the polygon
-        # And track its pixels over time.
-        first_frame_gray = None
-        first_surface_pts = None
+        tracked_id = None
+        target_obj_class = None
         
         frame_idx = 0
         while cap.isOpened():
@@ -124,155 +90,186 @@ class AdPlacementSystem:
                 frame_idx += 1
                 continue
                 
-            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
-            if debug_dir:
+            frame = cv2.resize(frame, (width, height))
+
+            if debug_dir and first_frame:
                 os.makedirs(debug_dir, exist_ok=True)
-                # Save every exact extracted frame
                 cv2.imwrite(os.path.join(debug_dir, f"extracted_frame_{frame_idx:05d}.jpg"), frame)
 
+            # --- 1. Object Detection for Occlusion and Negative Space ---
+            results = self.yolo_model.predict(frame, verbose=False)
+            
+            objects_mask = np.zeros((height, width), dtype=np.uint8)
+            person_mask = np.zeros((height, width), dtype=np.uint8)
+            
+            if len(results) > 0 and results[0].masks is not None:
+                masks = results[0].masks.data.cpu().numpy()
+                classes = results[0].boxes.cls.cpu().numpy()
+                
+                for c_idx, cls_val in enumerate(classes):
+                    m = masks[c_idx].astype(np.uint8)
+                    m = cv2.resize(m, (width, height))
+                    m_scaled = (m * 255).astype(np.uint8)
+                    
+                    objects_mask = cv2.bitwise_or(objects_mask, m_scaled)
+                    if int(cls_val) == 0: # 0 is person
+                        person_mask = cv2.bitwise_or(person_mask, m_scaled)
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            # --- 2. Surface/Banner Detection & Tracking ---
             if first_frame:
-                surface_pts = self.detect_surface(frame)
-                first_surface_pts = surface_pts.copy()
+                p0 = None
                 
-                # Get features to track
-                p0 = self.get_features_in_poly(frame_gray, surface_pts)
-                
-                if p0 is None or len(p0) < 4:
-                    # Fallback to just tracking the 4 corners of the poly
-                    p0 = surface_pts.reshape(-1, 1, 2)
+                # A: Semantic Rectangularity via FastSAM
+                # Analyzes all isolated objects in the scene and scores how physically rectangular they are 
+                # (1.0 = perfect rectangle banner, 0.4 = human/tree). Prioritizes largest static rectangular objects.
+                if self.sam_model is not None:
+                    sam_res = self.sam_model(frame, verbose=False)
                     
-                first_frame_gray = frame_gray.copy()
-                first_p0 = p0.copy()
-                prev_gray = frame_gray.copy()
-                
-                # Calculate Homography and place ad
-                H, _ = cv2.findHomography(logo_pts, surface_pts)
-                
-                if debug_dir:
-                    os.makedirs(debug_dir, exist_ok=True)
-                    # 2. Detected surface colored green
-                    surface_vis = frame.copy()
-                    cv2.fillConvexPoly(surface_vis, surface_pts.astype(np.int32), (0, 255, 0))
-                    cv2.addWeighted(surface_vis, 0.4, frame, 0.6, 0, surface_vis)
-                    cv2.imwrite(os.path.join(debug_dir, "detected_surface.jpg"), surface_vis)
+                    best_score = 0
+                    best_rect = None
+                    screen_area = width * height
                     
-                    # 3. Warped brand image ad
-                    warped_ad = cv2.warpPerspective(logo, H, (width, height))
-                    cv2.imwrite(os.path.join(debug_dir, "warped_ad.png"), warped_ad)
+                    if len(sam_res) > 0 and sam_res[0].masks is not None:
+                        sam_masks = sam_res[0].masks.data.cpu().numpy()
+                        
+                        for m in sam_masks:
+                            m_uint = (m * 255).astype(np.uint8)
+                            m_uint = cv2.resize(m_uint, (width, height))
+                            
+                            contours, _ = cv2.findContours(m_uint, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            if not contours:
+                                continue
+                                
+                            largest = max(contours, key=cv2.contourArea)
+                            area = cv2.contourArea(largest)
+                            
+                            # Banner must be between 1% and 30% of the scene natively
+                            if (screen_area * 0.01) < area < (screen_area * 0.30):
+                                rect = cv2.minAreaRect(largest)
+                                box_area = rect[1][0] * rect[1][1]
+                                
+                                if box_area > 0:
+                                    rectangularity = area / box_area # 1.0 means perfectly rectangular mask
+                                    
+                                    if rectangularity > 0.65:
+                                        # Ensure less than 15% overlap with dynamic people
+                                        overlap = cv2.bitwise_and(m_uint, person_mask)
+                                        if cv2.countNonZero(overlap) < (area * 0.15):
+                                            if rectangularity > best_score:
+                                                best_score = rectangularity
+                                                best_rect = rect
+                                                
+                        if best_rect is not None:
+                            p0 = cv2.boxPoints(best_rect).reshape(-1, 1, 2).astype(np.float32)
 
-                frame = self.place_ad(frame, logo, H)
-                
+                # B: Fallback to empty wall space, restricted to a reasonable size, centered.
+                if p0 is None:
+                    wall_mask = cv2.bitwise_not(objects_mask)
+                    kernel = np.ones((11, 11), np.uint8)
+                    wall_mask = cv2.morphologyEx(wall_mask, cv2.MORPH_OPEN, kernel)
+
+                    contours, _ = cv2.findContours(wall_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        largest = max(contours, key=cv2.contourArea)
+                        
+                        # Artificially clamp the fallback background surface size so it never engulfs the whole screen
+                        if cv2.contourArea(largest) > 1000:
+                            rect = cv2.minAreaRect(largest)
+                            
+                            rect_center = rect[0]
+                            rect_w, rect_h = rect[1]
+                            
+                            # Cap the max dimensions of a wall ad to 40% of the screen width
+                            max_ad_w = width * 0.4
+                            if rect_w > max_ad_w:
+                                scale = max_ad_w / rect_w
+                                rect_w *= scale
+                                rect_h *= scale
+                                
+                            clamped_rect = (rect_center, (rect_w, rect_h), rect[2])
+                            p0 = cv2.boxPoints(clamped_rect).reshape(-1, 1, 2).astype(np.float32)
+                            
+                # Order corner points for safe tracking and homography
+                if p0 is not None:
+                    surface_pts = p0.reshape(4, 2)
+                    s = surface_pts.sum(axis=1)
+                    diff = np.diff(surface_pts, axis=1)
+                    ordered = np.zeros((4, 2), dtype=np.float32)
+                    ordered[0] = surface_pts[np.argmin(s)]       # Top-left
+                    ordered[2] = surface_pts[np.argmax(s)]       # Bottom-right
+                    ordered[1] = surface_pts[np.argmin(diff)]    # Top-right
+                    ordered[3] = surface_pts[np.argmax(diff)]    # Bottom-left
+                    p0 = ordered.reshape(-1, 1, 2)
+                    
+                prev_gray = gray.copy()
                 first_frame = False
-            else:
-                # Track points
-                p1, st, err = cv2.calcOpticalFlowPyrLK(prev_gray, frame_gray, p0, None, **self.lk_params)
-                
-                # Filter good points
-                good_new = p1[st == 1]
-                good_old = p0[st == 1]
-                
-                H = None
-                if len(good_new) >= 4:
-                    # Find homography from FIRST frame to CURRENT frame using tracked features
-                    # To avoid drift, we can track relative to previous frame or first frame
-                    # Usually better to find homography of current features relative to original features
-                    H_motion, inliers = cv2.findHomography(first_p0[st == 1], good_new, cv2.RANSAC, 5.0)
-                    
-                    if H_motion is not None:
-                        # Update surface points based on new homography from first frame
-                        current_surface_pts = cv2.perspectiveTransform(first_surface_pts.reshape(-1, 1, 2), H_motion)
-                        surface_pts = current_surface_pts.reshape(4, 2)
-                        
-                        # Now find homography from logo to current surface
-                        H, _ = cv2.findHomography(logo_pts, surface_pts)
-                        
-                if H is not None:
-                    # Handle occlusion by frame differencing
-                    # Warp current frame back to first frame's perspective to get "background" differences
-                    H_inv = np.linalg.inv(H_motion)
-                    warped_current = cv2.warpPerspective(frame_gray, H_inv, (width, height))
-                    
-                    # Difference inside the originally detected polygon area
-                    mask = np.zeros_like(first_frame_gray)
-                    cv2.fillConvexPoly(mask, first_surface_pts.astype(np.int32), 255)
-                    
-                    diff = cv2.absdiff(first_frame_gray, warped_current)
-                    _, occlusion_mask_original = cv2.threshold(diff, 40, 255, cv2.THRESH_BINARY)
-                    occlusion_mask_original = cv2.bitwise_and(occlusion_mask_original, occlusion_mask_original, mask=mask)
-                    
-                    # Morphological operations to clean up noises in occlusion mask
-                    kernel = np.ones((5,5), np.uint8)
-                    occlusion_mask_original = cv2.morphologyEx(occlusion_mask_original, cv2.MORPH_OPEN, kernel)
-                    occlusion_mask_original = cv2.dilate(occlusion_mask_original, kernel, iterations=2)
-                    
-                    # Warp occlusion mask to current frame
-                    occlusion_mask = cv2.warpPerspective(occlusion_mask_original, H_motion, (width, height))
-                    
-                    # Place ad considering occlusion
-                    frame = self.place_ad(frame, logo, H, occlusion_mask)
-                else:
-                    print(f"Tracking lost at frame {frame_idx}. Attempting redetect...")
-                    # Re-detect
-                    surface_pts = self.detect_surface(frame)
-                    first_surface_pts = surface_pts.copy()
-                    p0 = self.get_features_in_poly(frame_gray, surface_pts)
-                    if p0 is None or len(p0) < 4:
-                        p0 = surface_pts.reshape(-1, 1, 2)
-                    first_p0 = p0.copy()
-                    prev_gray = frame_gray.copy()
-                    first_frame_gray = frame_gray.copy()
-                    
-                    H, _ = cv2.findHomography(logo_pts, surface_pts)
-                    if H is not None:
-                         frame = self.place_ad(frame, logo, H)
-                         
-                    frame_idx += 1
-                    out.write(frame)
-                    continue
 
-                # Now update the previous frame and previous points
-                prev_gray = frame_gray.copy()
-                p0 = good_new.reshape(-1, 1, 2)
-                first_p0 = first_p0[st == 1].reshape(-1, 1, 2)
+            else:
+                # Track the 4 plane corners across the video using Optical Flow
+                if 'p0' in locals() and p0 is not None:
+                    lk_params = dict(winSize=(21, 21), maxLevel=3, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+                    p1, st, err = cv2.calcOpticalFlowPyrLK(prev_gray, gray, p0, None, **lk_params)
+                    if st is not None and np.all(st == 1):
+                        p0 = p1
+                prev_gray = gray.copy()
+
+            # --- 3. Perspective, Depth, Blending ---
+            if 'p0' in locals() and p0 is not None:
+                H, _ = cv2.findHomography(logo_pts, p0.reshape(4, 2))
                 
-                # If too few points remain, re-detect features inside the updated polygon 
-                # (but maintaining relation to first frame is tricky. For simplicity, we just reset if too few)
-                if len(p0) < 10:
-                     print(f"Features depleted at frame {frame_idx}. Redetecting inside current tracking box.")
-                     new_features = self.get_features_in_poly(frame_gray, surface_pts)
-                     if new_features is not None and len(new_features) > 0:
-                         p0 = new_features
-                         first_p0 = cv2.perspectiveTransform(new_features, H_inv).reshape(-1, 1, 2)
+                if H is not None:
+                    depth_map = None
+                    if self.midas:
+                        img_tensor = self.midas_transform(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).to(self.device)
+                        with torch.no_grad():
+                            prediction = self.midas(img_tensor)
+                            prediction = torch.nn.functional.interpolate(
+                                prediction.unsqueeze(1), size=frame.shape[:2], mode="bicubic", align_corners=False
+                            ).squeeze()
+                        depth_map = prediction.cpu().numpy()
+                        if depth_map.max() > depth_map.min():
+                            depth_map = (depth_map - depth_map.min()) / (depth_map.max() - depth_map.min())
+
+                    # Blending & Rendering
+                    frame = self.blend_ad(frame, logo, H, None, person_mask, depth_map)
+                    
+                    if debug_dir and frame_idx == 1:
+                        warped_ad = cv2.warpPerspective(logo, H, (width, height))
+                        cv2.imwrite(os.path.join(debug_dir, "warped_ad.png"), warped_ad)
 
             out.write(frame)
+            if frame_idx % 5 == 0:
+                print(f"Processed frame {frame_idx}/{total_frames}...", flush=True)
             frame_idx += 1
 
         cap.release()
         out.release()
-        print("Processing finished.")
+        print("Processing finished.", flush=True)
 
-    def place_ad(self, frame, logo, H, occlusion_mask=None):
+    def blend_ad(self, frame, logo, H, sam_mask, person_mask, depth_map):
         h, w = frame.shape[:2]
         
-        # Warp the ad
         warped_ad = cv2.warpPerspective(logo, H, (w, h))
-        
-        # Extract alpha channel to create a mask for the ad footprint
         ad_alpha = warped_ad[:, :, 3]
-        _, ad_mask = cv2.threshold(ad_alpha, 1, 255, cv2.THRESH_BINARY)
+        _, initial_mask = cv2.threshold(ad_alpha, 1, 255, cv2.THRESH_BINARY)
         
-        # If there's an occlusion mask, don't display the ad where occlusion occurs
-        # occlusion_mask = 255 for occluding objects, 0 for background
-        if occlusion_mask is not None:
-            ad_mask = cv2.bitwise_and(ad_mask, cv2.bitwise_not(occlusion_mask))
+        if sam_mask is not None:
+            initial_mask = cv2.bitwise_and(initial_mask, sam_mask)
+            
+        if person_mask is not None:
+            initial_mask = cv2.bitwise_and(initial_mask, cv2.bitwise_not(person_mask))
 
-        # Create a 3-channel version of the updated mask
-        ad_mask_3c = cv2.cvtColor(ad_mask, cv2.COLOR_GRAY2BGR) / 255.0
+        ad_mask_3c = cv2.cvtColor(initial_mask, cv2.COLOR_GRAY2BGR) / 255.0
+        warped_ad_rgb = warped_ad[:, :, :3].astype(np.float32)
         
-        # Strip alpha from warped ad for blending
-        warped_ad_rgb = warped_ad[:, :, :3]
-        
-        # Blend the ad with the frame purely inside the ad_mask region
-        result = frame * (1.0 - ad_mask_3c) + warped_ad_rgb * ad_mask_3c
+        if depth_map is not None:
+            depth_factor = depth_map[:, :, np.newaxis]
+            warped_ad_rgb = warped_ad_rgb * (0.4 + 0.6 * depth_factor)
+            
+        warped_ad_rgb = cv2.GaussianBlur(warped_ad_rgb, (3, 3), 0)
+
+        frame_float = frame.astype(np.float32)
+        result = frame_float * (1.0 - ad_mask_3c) + warped_ad_rgb * ad_mask_3c
         return result.astype(np.uint8)
