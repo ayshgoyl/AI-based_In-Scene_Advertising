@@ -3,48 +3,63 @@ import numpy as np
 import os
 import torch
 import copy
+import time
 from ultralytics import YOLO, SAM, FastSAM
 
 class AdPlacementSystem:
-    def __init__(self, target_fps=None):
+    def __init__(self, target_fps=None, logger=None):
         self.target_fps = target_fps
+        self.logger = logger
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Using device: {self.device}", flush=True)
+        self._log("info", "Configuration", "Compute device initialized", device=str(self.device))
 
         # 1. Initialize YOLOv8 Segmentation model for Object Tracking & Human Occlusion
-        print("Loading YOLOv8-Seg...", flush=True)
+        self._log("info", "EventFlow", "Loading YOLOv8-Seg model...")
+        t0 = time.time()
         try:
             self.yolo_model = YOLO("yolov8n-seg.pt") 
+            self._log("info", "Performance", "YOLOv8-Seg loaded successfully", duration_seconds=round(time.time() - t0, 3))
         except Exception as e:
-            print("YOLO init error:", e, flush=True)
+            self._log("error", "Error", "YOLO init error", exception=str(e))
 
         # 2. Initialize SAM for exact Segmentation of the target surface
         self.sam_model = None
-        print("Loading FastSAM (lighter, faster variant of SAM)...", flush=True)
+        self._log("info", "EventFlow", "Loading FastSAM model...")
+        t0 = time.time()
         try:
             self.sam_model = FastSAM("FastSAM-s.pt")
+            self._log("info", "Performance", "FastSAM loaded successfully", duration_seconds=round(time.time() - t0, 3))
         except Exception as e:
-            print("SAM init error:", e, flush=True)
+            self._log("error", "Error", "SAM init error", exception=str(e))
 
         # 3. Initialize MiDaS for Depth Estimation
-        print("Loading MiDaS...", flush=True)
+        self._log("info", "EventFlow", "Loading MiDaS depth model...")
+        t0 = time.time()
         try:
             self.midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small").to(self.device).eval()
             midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
             self.midas_transform = midas_transforms.small_transform
+            self._log("info", "Performance", "MiDaS loaded successfully", duration_seconds=round(time.time() - t0, 3))
         except Exception as e:
-            print("MiDaS init error:", e, flush=True)
+            self._log("error", "Error", "MiDaS init error", exception=str(e))
             self.midas = None
 
+    def _log(self, level, category, message, **kwargs):
+        if self.logger:
+            getattr(self.logger, level)(category, message, **kwargs)
+        else:
+            print(f"[{level.upper()}] [{category}] {message} | {kwargs}", flush=True)
+
     def process_video(self, video_path, logo_path, output_path, debug_dir=None):
+        self._log("info", "EventFlow", "Opening video file for processing", video_path=video_path)
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            print(f"Error opening video at {video_path}")
+            self._log("error", "Error", "Failed to open video", video_path=video_path)
             return
             
         logo = cv2.imread(logo_path, cv2.IMREAD_UNCHANGED)
         if logo is None:
-            print(f"Error opening logo at {logo_path}")
+            self._log("error", "Error", "Failed to open logo", logo_path=logo_path)
             return
         if logo.shape[2] == 3:
             logo = cv2.cvtColor(logo, cv2.COLOR_BGR2BGRA)
@@ -55,6 +70,8 @@ class AdPlacementSystem:
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         fps = self.target_fps if self.target_fps else original_fps
         frame_read_interval = int(original_fps / fps) if fps and original_fps >= fps else 1
+        
+        self._log("info", "Variable", "Video framerate calculated", original_fps=original_fps, target_fps=fps, frame_read_interval=frame_read_interval)
 
         original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -68,13 +85,16 @@ class AdPlacementSystem:
         else:
             width = original_width
             height = original_height
+            scale = 1.0
+            
+        self._log("info", "Variable", "Video dimensions resolved", original_dims=f"{original_width}x{original_height}", new_dims=f"{width}x{height}", scale=scale)
         
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         fourcc = cv2.VideoWriter_fourcc(*'avc1')
         out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-        print(f"Starting video processing: {width}x{height} @ {fps} FPS (Total frames: {total_frames})", flush=True)
+        self._log("info", "EventFlow", "Starting main video processing loop", total_frames=total_frames)
 
         first_frame = True
         tracked_id = None
@@ -105,6 +125,11 @@ class AdPlacementSystem:
             if len(results) > 0 and results[0].masks is not None:
                 masks = results[0].masks.data.cpu().numpy()
                 classes = results[0].boxes.cls.cpu().numpy()
+                confs = results[0].boxes.conf.cpu().numpy()
+                
+                if len(confs) > 0 and frame_idx % 5 == 0:
+                    avg_conf = float(np.mean(confs))
+                    self._log("info", "Performance", "YOLO object detection confidence", avg_confidence=round(avg_conf, 3), objects_detected=len(confs))
                 
                 for c_idx, cls_val in enumerate(classes):
                     m = masks[c_idx].astype(np.uint8)
@@ -163,6 +188,7 @@ class AdPlacementSystem:
                                                 
                         if best_rect is not None:
                             p0 = cv2.boxPoints(best_rect).reshape(-1, 1, 2).astype(np.float32)
+                            self._log("info", "Performance", "Surface detection confidence (rectangularity via FastSAM)", rectangularity_score=round(float(best_score), 3))
 
                 # B: Fallback to empty wall space, restricted to a reasonable size, centered.
                 if p0 is None:
@@ -213,6 +239,9 @@ class AdPlacementSystem:
                     p1, st, err = cv2.calcOpticalFlowPyrLK(prev_gray, gray, p0, None, **lk_params)
                     if st is not None and np.all(st == 1):
                         p0 = p1
+                        if err is not None and frame_idx % 5 == 0:
+                            avg_track_err = float(np.mean(err))
+                            self._log("info", "Performance", "Optical flow tracking error (inversely tracks tracking confidence)", avg_tracking_error=round(avg_track_err, 3))
                 prev_gray = gray.copy()
 
             # --- 3. Perspective, Depth, Blending ---
@@ -241,12 +270,12 @@ class AdPlacementSystem:
 
             out.write(frame)
             if frame_idx % 5 == 0:
-                print(f"Processed frame {frame_idx}/{total_frames}...", flush=True)
+                self._log("info", "Performance", "Processed frames milestone", processed=frame_idx, total=total_frames, pct=round(frame_idx/max(1, total_frames)*100, 1))
             frame_idx += 1
 
         cap.release()
         out.release()
-        print("Processing finished.", flush=True)
+        self._log("info", "EventFlow", "Video processing loop completed successfully")
 
     def blend_ad(self, frame, logo, H, sam_mask, person_mask, depth_map):
         h, w = frame.shape[:2]

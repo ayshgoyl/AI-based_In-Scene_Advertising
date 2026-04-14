@@ -5,10 +5,12 @@ import cv2
 import imageio_ffmpeg
 import tempfile
 import mimetypes
+import time
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, render_template
 
 from ad_inserter import AdPlacementSystem
+from logger import EnterpriseLogger
 
 load_dotenv()
 try:
@@ -88,32 +90,52 @@ def prepare():
     job_upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], job_id)
     os.makedirs(job_upload_dir, exist_ok=True)
 
+    log_file_path = os.path.join(app.config['OUTPUT_FOLDER'], job_id, f"{job_id}.log")
+    os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+    logger = EnterpriseLogger(log_file_path, job_id)
+
+    logger.info("EventFlow", "Asset preparation started", endpoint="/prepare", method=request.method)
+    logger.info("Security", "Incoming request details", ip=request.remote_addr, user_agent=str(request.user_agent))
+    logger.info("Configuration", "Upload directories created", upload_dir=job_upload_dir)
+
     video_path = os.path.join(job_upload_dir, "input_video.mp4")
     logo_path = os.path.join(job_upload_dir, "input_logo.png")
     
+    logger.info("EventFlow", "Saving uploaded files to disk")
     video_file.save(video_path)
     logo_file.save(logo_path)
 
     # 1-3. Initial video metadata
     initial_v_size, initial_v_codec, initial_v_fps = get_video_metadata(video_path)
+    logger.info("Variable", "Initial video metadata", size=initial_v_size, codec=initial_v_codec, fps=initial_v_fps)
     
     # 4-5. Logo metadata
     logo_size = os.path.getsize(logo_path)
     logo_img = cv2.imread(logo_path)
     logo_dims = f"{logo_img.shape[1]}x{logo_img.shape[0]}" if logo_img is not None else "Unknown"
+    logger.info("Variable", "Initial logo metadata", size=logo_size, dimensions=logo_dims)
 
     # 6-7. Convert using FFmpeg (H.264, 24fps)
     prepared_video_path = os.path.join(job_upload_dir, "prepared_video.mp4")
+    logger.info("EventFlow", "Starting FFmpeg conversion to 24fps H.264")
+    start_time = time.time()
     try:
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         subprocess.run([ffmpeg_exe, '-y', '-i', video_path, '-c:v', 'libx264', '-r', '24', '-preset', 'fast', prepared_video_path], check=True, stderr=subprocess.PIPE)
+        logger.info("Performance", "FFmpeg conversion completed", duration_seconds=round(time.time() - start_time, 2))
     except subprocess.CalledProcessError as e:
-        return jsonify({"error": f"FFmpeg failed: {e.stderr.decode()}"}), 500
+        err_msg = e.stderr.decode()
+        logger.error("Error", "FFmpeg failed", stderr=err_msg)
+        return jsonify({"error": f"FFmpeg failed: {err_msg}"}), 500
     except Exception as e:
+        logger.error("Error", "Failed to execute FFmpeg", exception=str(e))
         return jsonify({"error": f"Failed to execute FFmpeg: {str(e)}"}), 500
         
     # 8-10. New video metadata
     new_v_size, new_v_codec, new_v_fps = get_video_metadata(prepared_video_path)
+    logger.info("Variable", "Transformed video metadata", size=new_v_size, codec=new_v_codec, fps=new_v_fps)
+
+    logger.info("EventFlow", "Asset preparation completed successfully")
 
     return jsonify({
         "job_id": job_id,
@@ -139,16 +161,27 @@ def process():
     job_output_dir = os.path.join(app.config['OUTPUT_FOLDER'], job_id)
     
     os.makedirs(job_output_dir, exist_ok=True)
+    
+    log_file_path = os.path.join(job_output_dir, f"{job_id}.log")
+    logger = EnterpriseLogger(log_file_path, job_id)
+    
+    logger.info("EventFlow", "Processing started", endpoint="/process", method=request.method)
+    logger.info("Configuration", "Output directory configured", output_dir=job_output_dir)
 
     # Use the 24fps H.264 prepared video!
     video_path = os.path.join(job_upload_dir, "prepared_video.mp4")
     logo_path = os.path.join(job_upload_dir, "input_logo.png")
     output_video_path = os.path.join(job_output_dir, "output.mp4")
 
+    logger.info("EventFlow", "Initializing AdPlacementSystem")
     try:
-        system = AdPlacementSystem()
+        start_time = time.time()
+        system = AdPlacementSystem(logger=logger)
+        logger.info("EventFlow", "Starting video processing pipeline")
         system.process_video(video_path, logo_path, output_video_path, debug_dir=job_output_dir)
+        logger.info("Performance", "Video processing pipeline completed", duration_seconds=round(time.time() - start_time, 2))
         
+        logger.info("EventFlow", "Uploading extracted frames and results to Supabase")
         extracted_frames_urls = []
         if os.path.exists(job_output_dir):
             for file in sorted(os.listdir(job_output_dir)):
@@ -164,16 +197,23 @@ def process():
         warped_ad_url = get_or_upload_file(warped_ad_local, f"{job_id}/warped_ad.png")
         
         output_video_url = get_or_upload_file(output_video_path, f"{job_id}/output.mp4")
+        
+        logger.info("EventFlow", "Uploading job execution log to Supabase")
+        log_file_url = get_or_upload_file(log_file_path, f"{job_id}/{job_id}.log")
 
+        logger.info("EventFlow", "Processing complete, returning API payload")
         return jsonify({
             "message": "Processing complete",
             "extracted_frames": extracted_frames_urls,
             "detected_surface": det_surf_url,
             "warped_ad": warped_ad_url,
-            "output_video": output_video_url
+            "output_video": output_video_url,
+            "execution_log": log_file_url
         })
     except Exception as e:
         import traceback
+        err_traceback = traceback.format_exc()
+        logger.error("Error", "Processing pipeline failed with exception", exception=str(e), traceback=err_traceback)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
