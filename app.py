@@ -6,9 +6,16 @@ import imageio_ffmpeg
 import tempfile
 import mimetypes
 import time
+import json
+import numpy as np
+try:
+    import pycocotools.mask as maskUtils
+except ImportError:
+    maskUtils = None
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, render_template
 
+# Local imports
 from ad_inserter import AdPlacementSystem
 from logger import EnterpriseLogger
 
@@ -216,6 +223,114 @@ def process():
         logger.error("Error", "Processing pipeline failed with exception", exception=str(e), traceback=err_traceback)
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+@app.route('/evaluate', methods=['POST'])
+def evaluate():
+    job_id = request.form.get('job_id')
+    if not job_id:
+        return jsonify({"error": "No job ID provided"}), 400
+
+    if 'ground_truth' not in request.files:
+        return jsonify({"error": "Missing ground truth file"}), 400
+
+    job_output_dir = os.path.join(app.config['OUTPUT_FOLDER'], job_id)
+    pred_path = os.path.join(job_output_dir, "predictions.json")
+    
+    if not os.path.exists(pred_path):
+        return jsonify({"error": "Predictions not found for this job. Ensure you completed processing safely."}), 400
+        
+    gt_file = request.files['ground_truth']
+    try:
+        gt_data = json.load(gt_file)
+    except Exception as e:
+        return jsonify({"error": f"Invalid JSON format: {str(e)}"}), 400
+        
+    try:
+        with open(pred_path, 'r') as f:
+            pred_data = json.load(f)
+
+        gt_masks = {}
+        for ann in gt_data.get('annotations', []):
+            img_id = ann['image_id']
+            if img_id not in gt_masks:
+                gt_masks[img_id] = []
+            seg = ann['segmentation']
+            
+            if isinstance(seg, dict) and 'counts' in seg:
+                if isinstance(seg['counts'], str):
+                    seg['counts'] = seg['counts'].encode('utf-8')
+                gt_masks[img_id].append(seg)
+            elif isinstance(seg, list):
+                height = gt_data['images'][img_id]['height'] if img_id < len(gt_data['images']) else pred_data['height']
+                width = gt_data['images'][img_id]['width'] if img_id < len(gt_data['images']) else pred_data['width']
+                rle = maskUtils.frPyObjects(seg, height, width)
+                gt_masks[img_id].append(rle[0])
+
+        height = pred_data['height']
+        width = pred_data['width']
+        
+        # Build image dimensions lookup
+        image_dims = {img['id']: (img['width'], img['height']) for img in gt_data.get('images', [])}
+        
+        ious = []
+        accuracies = []
+        
+        for i, pred in enumerate(pred_data.get('predictions', [])):
+            img_id = list(gt_masks.keys())[i] if i < len(gt_masks) else None
+            if img_id is None:
+                break
+                
+            gt_rles = gt_masks[img_id]
+            gt_w, gt_h = image_dims.get(img_id, (width, height))
+            
+            # Pred mask
+            poly = np.array(pred['polygon'], dtype=np.float32)
+            
+            # Scale the predicted coordinates up to the original ground truth size
+            scale_x = gt_w / float(width)
+            scale_y = gt_h / float(height)
+            poly[:, 0] *= scale_x
+            poly[:, 1] *= scale_y
+            
+            flat_poly = poly.flatten().tolist()
+            pred_rle = maskUtils.frPyObjects([flat_poly], gt_h, gt_w)[0]
+            
+            iou_matrix = maskUtils.iou([pred_rle], gt_rles, [0]*len(gt_rles))
+            max_iou = float(np.max(iou_matrix)) if iou_matrix.size > 0 else 0.0
+            ious.append(max_iou)
+            
+            pred_bin = maskUtils.decode(pred_rle)
+            gt_bin = np.zeros((gt_h, gt_w), dtype=np.uint8)
+            for rle in gt_rles:
+                gt_bin = np.maximum(gt_bin, maskUtils.decode(rle))
+                
+            correct_pixels = np.sum(pred_bin == gt_bin)
+            total_pixels = gt_h * gt_w
+            acc = float(correct_pixels) / total_pixels
+            accuracies.append(acc)
+
+        mIoU = float(np.mean(ious)) if ious else 0.0
+        pixel_acc = float(np.mean(accuracies)) if accuracies else 0.0
+        mAP = float(np.mean([1 if iou > 0.5 else 0 for iou in ious])) if ious else 0.0
+        
+        metrics = {
+            "mIOU": round(mIoU, 4),
+            "PixelAccuracy": round(pixel_acc, 4),
+            "mAP_50": round(mAP, 4),
+            "Frames_Evaluated": len(ious)
+        }
+        
+        log_file_path = os.path.join(job_output_dir, f"{job_id}.log")
+        logger = EnterpriseLogger(log_file_path, job_id)
+        
+        logger.info("EventFlow", "Ground truth evaluation triggered")
+        logger.info("Performance", "Metric evaluation complete", iou=metrics["mIOU"], accuracy=metrics["PixelAccuracy"], mAP=metrics["mAP_50"], frames_evaluated=metrics["Frames_Evaluated"])
+        
+        return jsonify(metrics)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Evaluation error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

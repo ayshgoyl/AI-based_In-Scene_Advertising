@@ -118,6 +118,27 @@
                         </video>
                     </div>
                 </div>
+
+                <div id="metrics-evaluation-section" class="glass-panel fade-in" style="margin-top: 30px; animation-delay: 0.4s">
+                    <h3>Metrics Evaluation</h3>
+                    <p class="desc">Compute analytical performance metrics against ground truth annotations.</p>
+                    <button type="button" id="calc-metrics-btn" style="width: 100%; font-weight: bold; margin-bottom: 10px;">Calculate and view Metrics</button>
+                    
+                    <div id="gt-upload-section" class="hidden" style="margin-top: 15px;">
+                        <input type="file" id="gt-upload" accept=".json" style="display: none;">
+                        <button type="button" id="import-gt-btn" style="width: 100%; font-weight: bold; background-color: #f39c12; color: #fff; border:none; padding:10px; cursor:pointer; border-radius:4px;">Import Ground Truth (.json)</button>
+                        <div class="loader hidden" id="evaluate-loader" style="margin-top: 10px;">Calculating metrics...</div>
+                    </div>
+                    
+                    <div id="metrics-results" class="hidden" style="margin-top: 20px;">
+                        <table style="width: 100%; border-collapse: collapse; margin-bottom: 15px;" border="1" cellpadding="8">
+                            <thead>
+                                <tr style="background-color: #f0f0f0;"><th>Metric</th><th>Score</th></tr>
+                            </thead>
+                            <tbody id="metrics-tbody"></tbody>
+                        </table>
+                    </div>
+                </div>
             </section>
         </main>
     </div>

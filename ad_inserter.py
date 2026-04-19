@@ -99,6 +99,7 @@ class AdPlacementSystem:
         first_frame = True
         tracked_id = None
         target_obj_class = None
+        predictions = [] # Store predicted ad polygons for metric evaluation
         
         frame_idx = 0
         while cap.isOpened():
@@ -129,6 +130,9 @@ class AdPlacementSystem:
                 
                 if len(confs) > 0 and frame_idx % 5 == 0:
                     avg_conf = float(np.mean(confs))
+                    detected_class_names = [self.yolo_model.names[int(cls_id)] for cls_id in classes]
+                    unique_classes = list(set(detected_class_names))
+                    self._log("info", "Variable", "YOLO object detected classes", detected_classes=unique_classes)
                     self._log("info", "Performance", "YOLO object detection confidence", avg_confidence=round(avg_conf, 3), objects_detected=len(confs))
                 
                 for c_idx, cls_val in enumerate(classes):
@@ -246,6 +250,12 @@ class AdPlacementSystem:
 
             # --- 3. Perspective, Depth, Blending ---
             if 'p0' in locals() and p0 is not None:
+                # Save prediction coordinates for this frame before warping
+                predictions.append({
+                    "frame_idx": frame_idx,
+                    "polygon": p0.reshape(4, 2).tolist()
+                })
+                
                 H, _ = cv2.findHomography(logo_pts, p0.reshape(4, 2))
                 
                 if H is not None:
@@ -275,6 +285,18 @@ class AdPlacementSystem:
 
         cap.release()
         out.release()
+        
+        if debug_dir:
+            import json
+            pred_file = os.path.join(debug_dir, "predictions.json")
+            with open(pred_file, "w") as f:
+                json.dump({
+                    "width": width,
+                    "height": height,
+                    "target_fps": fps,
+                    "predictions": predictions
+                }, f)
+                
         self._log("info", "EventFlow", "Video processing loop completed successfully")
 
     def blend_ad(self, frame, logo, H, sam_mask, person_mask, depth_map):

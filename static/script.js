@@ -139,4 +139,62 @@ document.addEventListener('DOMContentLoaded', () => {
             processLoader.classList.add('hidden');
         }
     });
+
+    // --- Metrics Evaluation Logic ---
+    const calcMetricsBtn = document.getElementById('calc-metrics-btn');
+    const gtUploadSection = document.getElementById('gt-upload-section');
+    const importGtBtn = document.getElementById('import-gt-btn');
+    const gtUploadInput = document.getElementById('gt-upload');
+    const evaluateLoader = document.getElementById('evaluate-loader');
+    const metricsResults = document.getElementById('metrics-results');
+    const metricsTbody = document.getElementById('metrics-tbody');
+
+    if (calcMetricsBtn) {
+        calcMetricsBtn.addEventListener('click', () => {
+            gtUploadSection.classList.remove('hidden');
+            calcMetricsBtn.style.display = 'none';
+        });
+    }
+
+    if (importGtBtn) {
+        importGtBtn.addEventListener('click', () => {
+            gtUploadInput.click();
+        });
+    }
+
+    if (gtUploadInput) {
+        gtUploadInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            importGtBtn.disabled = true;
+            evaluateLoader.classList.remove('hidden');
+            metricsResults.classList.add('hidden');
+
+            const fd = new FormData();
+            fd.append('job_id', currentJobId);
+            fd.append('ground_truth', file);
+
+            try {
+                const response = await fetch('/evaluate', { method: 'POST', body: fd });
+                const data = await response.json();
+
+                if (!response.ok) throw new Error(data.error || 'Evaluation failed');
+
+                metricsTbody.innerHTML = `
+                    <tr><td>Mean Intersection Over Union (mIOU)</td><td><strong>${data.mIOU}</strong></td></tr>
+                    <tr><td>Pixel Classification Accuracy</td><td><strong>${data.PixelAccuracy}</strong></td></tr>
+                    <tr><td>Mean Average Precision (mAP@0.5)</td><td><strong>${data.mAP_50}</strong></td></tr>
+                    <tr><td colspan="2" style="background:#eaf8ea; font-size: 0.9em; text-align:center;">Successfully evaluated ${data.Frames_Evaluated} frames. Logged into Performance logs.</td></tr>
+                `;
+                metricsResults.classList.remove('hidden');
+            } catch (err) {
+                alert("Error calculating metrics: " + err.message);
+            } finally {
+                importGtBtn.disabled = false;
+                evaluateLoader.classList.add('hidden');
+            }
+        });
+    }
+
 });
