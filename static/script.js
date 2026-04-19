@@ -185,6 +185,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     <tr><td>Mean Intersection Over Union (mIOU)</td><td><strong>${data.mIOU}</strong></td></tr>
                     <tr><td>Pixel Classification Accuracy</td><td><strong>${data.PixelAccuracy}</strong></td></tr>
                     <tr><td>Mean Average Precision (mAP@0.5)</td><td><strong>${data.mAP_50}</strong></td></tr>
+                    <tr><td>Cloud Storage Uploads</td><td><strong>${data.Cloud_Upload_Count} files</strong></td></tr>
+                    <tr><td>Total Cloud Comp. Time</td><td><strong>${data.Cloud_Upload_Time_sec}s</strong></td></tr>
+                    <tr><td>Total Cloud Data Transfer</td><td><strong>${data.Cloud_Upload_MB} MB</strong></td></tr>
                     <tr><td colspan="2" style="background:#eaf8ea; font-size: 0.9em; text-align:center;">Successfully evaluated ${data.Frames_Evaluated} frames. Logged into Performance logs.</td></tr>
                 `;
                 metricsResults.classList.remove('hidden');

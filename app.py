@@ -60,7 +60,7 @@ def get_video_metadata(filepath):
     except Exception:
         return os.path.getsize(filepath) if os.path.exists(filepath) else 0, "unknown", 0
 
-def get_or_upload_file(local_path, remote_path):
+def get_or_upload_file(local_path, remote_path, logger=None):
     if not os.path.exists(local_path):
         return ""
     if not supabase:
@@ -71,13 +71,19 @@ def get_or_upload_file(local_path, remote_path):
         mime_type = "application/octet-stream"
         
     try:
+        start_time = time.time()
         supabase.storage.from_(supabase_bucket).upload(
             path=remote_path,
             file=local_path,
             file_options={"content-type": mime_type, "upsert": "true"}
         )
+        duration = round(time.time() - start_time, 3)
+        if logger:
+            logger.info("Performance", f"Cloud Upload {remote_path}", duration_seconds=duration, size_bytes=os.path.getsize(local_path))
         return supabase.storage.from_(supabase_bucket).get_public_url(remote_path)
     except Exception as e:
+        if logger:
+            logger.error("Error", f"Supabase upload failed for {local_path}", exception=str(e))
         print(f"Supabase upload failed for {local_path}: {e}")
         return f"/static/outputs/{remote_path}"
 
@@ -195,18 +201,19 @@ def process():
                 if file.startswith("extracted_frame_") and file.endswith(".jpg"):
                     local_f = os.path.join(job_output_dir, file)
                     remote_f = f"{job_id}/{file}"
-                    extracted_frames_urls.append(get_or_upload_file(local_f, remote_f))
+                    extracted_frames_urls.append(get_or_upload_file(local_f, remote_f, logger))
         
         det_surf_local = os.path.join(job_output_dir, "detected_surface.jpg")
-        det_surf_url = get_or_upload_file(det_surf_local, f"{job_id}/detected_surface.jpg")
+        det_surf_url = get_or_upload_file(det_surf_local, f"{job_id}/detected_surface.jpg", logger)
         
         warped_ad_local = os.path.join(job_output_dir, "warped_ad.png")
-        warped_ad_url = get_or_upload_file(warped_ad_local, f"{job_id}/warped_ad.png")
+        warped_ad_url = get_or_upload_file(warped_ad_local, f"{job_id}/warped_ad.png", logger)
         
-        output_video_url = get_or_upload_file(output_video_path, f"{job_id}/output.mp4")
+        output_video_path = os.path.join(job_output_dir, "output.mp4")
+        output_video_url = get_or_upload_file(output_video_path, f"{job_id}/output.mp4", logger)
         
         logger.info("EventFlow", "Uploading job execution log to Supabase")
-        log_file_url = get_or_upload_file(log_file_path, f"{job_id}/{job_id}.log")
+        log_file_url = get_or_upload_file(log_file_path, f"{job_id}/{job_id}.log", logger)
 
         logger.info("EventFlow", "Processing complete, returning API payload")
         return jsonify({
@@ -313,18 +320,45 @@ def evaluate():
         pixel_acc = float(np.mean(accuracies)) if accuracies else 0.0
         mAP = float(np.mean([1 if iou > 0.5 else 0 for iou in ious])) if ious else 0.0
         
+        log_file_path = os.path.join(job_output_dir, f"{job_id}.log")
+        
+        cloud_upload_time = 0.0
+        cloud_upload_count = 0
+        cloud_upload_bytes = 0
+        
+        if os.path.exists(log_file_path):
+            with open(log_file_path, 'r', encoding='utf-8') as lf:
+                for line in lf:
+                    if "[PERFORMANCE]" in line.upper() and "Cloud Upload" in line:
+                        if "duration_seconds=" in line:
+                            try:
+                                dur_str = line.split("duration_seconds=")[1].split(",")[0].strip()
+                                cloud_upload_time += float(dur_str)
+                                cloud_upload_count += 1
+                            except:
+                                pass
+                        if "size_bytes=" in line:
+                            try:
+                                size_str = line.split("size_bytes=")[1].split(",")[0].strip()
+                                cloud_upload_bytes += int(size_str)
+                            except:
+                                pass
+
         metrics = {
             "mIOU": round(mIoU, 4),
             "PixelAccuracy": round(pixel_acc, 4),
             "mAP_50": round(mAP, 4),
-            "Frames_Evaluated": len(ious)
+            "Frames_Evaluated": len(ious),
+            "Cloud_Upload_Count": cloud_upload_count,
+            "Cloud_Upload_Time_sec": round(cloud_upload_time, 3),
+            "Cloud_Upload_MB": round(cloud_upload_bytes / (1024 * 1024), 3)
         }
         
         log_file_path = os.path.join(job_output_dir, f"{job_id}.log")
         logger = EnterpriseLogger(log_file_path, job_id)
         
         logger.info("EventFlow", "Ground truth evaluation triggered")
-        logger.info("Performance", "Metric evaluation complete", iou=metrics["mIOU"], accuracy=metrics["PixelAccuracy"], mAP=metrics["mAP_50"], frames_evaluated=metrics["Frames_Evaluated"])
+        logger.info("Performance", "Metric evaluation complete", iou=metrics["mIOU"], accuracy=metrics["PixelAccuracy"], mAP=metrics["mAP_50"], frames_evaluated=metrics["Frames_Evaluated"], cloud_ops=metrics["Cloud_Upload_Count"])
         
         return jsonify(metrics)
     except Exception as e:
